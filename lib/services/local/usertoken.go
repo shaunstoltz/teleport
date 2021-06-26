@@ -66,6 +66,10 @@ func (s *IdentityService) DeleteUserToken(ctx context.Context, tokenID string) e
 
 // GetUserToken returns a token by its ID.
 func (s *IdentityService) GetUserToken(ctx context.Context, tokenID string) (types.UserToken, error) {
+	if tokenID == "" {
+		return nil, trace.BadParameter("missing parameter tokenID")
+	}
+
 	item, err := s.Get(ctx, backend.Key(userTokenPrefix, tokenID, paramsPrefix))
 	if err != nil {
 		if trace.IsNotFound(err) {
@@ -108,6 +112,10 @@ func (s *IdentityService) CreateUserToken(ctx context.Context, token types.UserT
 
 // GetUserTokenSecrets returns token secrets.
 func (s *IdentityService) GetUserTokenSecrets(ctx context.Context, tokenID string) (types.UserTokenSecrets, error) {
+	if tokenID == "" {
+		return nil, trace.BadParameter("missing parameter tokenID")
+	}
+
 	item, err := s.Get(ctx, backend.Key(userTokenPrefix, tokenID, secretsPrefix))
 	if err != nil {
 		if trace.IsNotFound(err) {

@@ -18,6 +18,7 @@ package auth
 
 import (
 	"context"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -217,6 +218,39 @@ func TestFormatAccountName(t *testing.T) {
 			require.Equal(t, accountName, tt.outAccountName)
 		})
 	}
+}
+
+func TestCreateRecoveryToken(t *testing.T) {
+	srv := newTestTLSServer(t)
+
+	username := "joe@example.com"
+	_, _, err := CreateUserAndRole(srv.Auth(), username, []string{username})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+
+	startToken, err := srv.Auth().createRecoveryToken(ctx, username, UserTokenTypeRecoveryStart, types.RecoverType_RECOVER_PASSWORD)
+	require.NoError(t, err)
+	require.Equal(t, startToken.GetURL(), "https://<proxyhost>:3080/web/recovery/"+startToken.GetName())
+
+	// Test token uses correct byte length.
+	bytes, err := hex.DecodeString(startToken.GetName())
+	require.NoError(t, err)
+	require.Len(t, bytes, RecoveryTokenLenBytes)
+
+	// Test recover type setting.
+	require.Equal(t, types.RecoverType_RECOVER_PASSWORD, startToken.GetRecoverType())
+
+	approvedToken, err := srv.Auth().createRecoveryToken(ctx, username, UserTokenTypeRecoveryApproved, types.RecoverType_RECOVER_U2F)
+	require.NoError(t, err)
+	require.Equal(t, approvedToken.GetURL(), "https://<proxyhost>:3080/web/recovery/"+approvedToken.GetName())
+
+	bytes, err = hex.DecodeString(approvedToken.GetName())
+	require.NoError(t, err)
+	require.Len(t, bytes, RecoveryTokenLenBytes)
+
+	// Test recover type setting.
+	require.Equal(t, types.RecoverType_RECOVER_U2F, approvedToken.GetRecoverType())
 }
 
 type debugAuth struct {
