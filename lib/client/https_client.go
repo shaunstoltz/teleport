@@ -72,6 +72,37 @@ type WebClient struct {
 	*roundtrip.Client
 }
 
+func (w *WebClient) PostJSONWithFallback(ctx context.Context, endpoint string, allowHTTPFallback bool, val interface{}) (*roundtrip.Response, error) {
+	// First try HTTPS and see how that goes
+	resp, err := w.Client.PostJSON(ctx, endpoint, val)
+	if err == nil {
+		// If all went well, then we don't need to do anything else - just return
+		// that response
+		return httplib.ConvertResponse(resp, err)
+	}
+
+	// Parse out the endpoint into its constituent parts. We will need the
+	// hostname to decide if we're allowed to fall back to HTTPS, and we will
+	// re-use this for re-writing the endpoint URL later on anyway.
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	// If we're not allowed to try plain HTTP, bail out with whatever error we have.
+	// Note that we're only allowed to try plain HTTP on the loopback address, even
+	// if the caller says its OK
+	if !(allowHTTPFallback && utils.IsLoopback(u.Host)) {
+		return nil, trace.Wrap(err)
+	}
+
+	// re-write the endpoint to
+	u.Scheme = "http"
+	endpoint = u.String()
+
+	return httplib.ConvertResponse(w.Client.PostJSON(ctx, endpoint, val))
+}
+
 func (w *WebClient) PostJSON(ctx context.Context, endpoint string, val interface{}) (*roundtrip.Response, error) {
 	return httplib.ConvertResponse(w.Client.PostJSON(ctx, endpoint, val))
 }
