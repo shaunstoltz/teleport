@@ -727,6 +727,15 @@ func CopyRulesSlice(in []Rule) []Rule {
 // from scalar and list values
 type Labels map[string]utils.Strings
 
+// LabelsFromProto converts proto labels wrapper to labels.
+func LabelsFromProto(w wrappers.LabelValues) Labels {
+	l := Labels{}
+	for k, v := range w.Values {
+		l[k] = utils.Strings(v.Values)
+	}
+	return l
+}
+
 func (l Labels) protoType() *wrappers.LabelValues {
 	v := &wrappers.LabelValues{
 		Values: make(map[string]wrappers.StringValues, len(l)),

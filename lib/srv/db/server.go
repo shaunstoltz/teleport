@@ -144,6 +144,8 @@ type Server struct {
 	dynamicLabels map[string]*labels.Dynamic
 	// heartbeats holds hearbeats for database servers.
 	heartbeats map[string]*srv.Heartbeat
+	// databases are databases registered dynamically.
+	databases map[string]types.Database
 	// mu protects access to server infos.
 	mu sync.RWMutex
 	// log is used for logging.
@@ -165,6 +167,7 @@ func New(ctx context.Context, config Config) (*Server, error) {
 		closeFunc:     cancel,
 		dynamicLabels: make(map[string]*labels.Dynamic),
 		heartbeats:    make(map[string]*srv.Heartbeat),
+		databases:     make(map[string]types.Database),
 		middleware: &auth.Middleware{
 			AccessPoint:   config.AccessPoint,
 			AcceptedUsage: []string{teleport.UsageDatabaseOnly},
@@ -176,21 +179,49 @@ func New(ctx context.Context, config Config) (*Server, error) {
 	server.cfg.TLSConfig.GetConfigForClient = getConfigForClient(
 		server.cfg.TLSConfig, server.cfg.AccessPoint, server.log)
 
+	// Register databases that were created by users as resources.
+	if err := server.initDynamicDatabases(ctx); err != nil {
+		return nil, trace.Wrap(err)
+	}
+
 	// Initialize the heartbeat which will periodically register
 	// this server with the auth server.
 	if err := server.initHeartbeat(ctx, server.cfg.Server); err != nil {
 		return nil, trace.Wrap(err)
 	}
 
+	// Initialize watcher that will be dynamically adding/removing proxied
+	// databases based on the database resources created by
+	go func() {
+		if err := server.initWatcher(ctx); err != nil {
+			server.log.WithError(err).Error("Failed to initialize watcher.")
+		}
+	}()
+
 	// Perform various initialization actions on each proxied database, like
 	// starting up dynamic labels and loading root certs for RDS dbs.
-	for _, db := range server.cfg.Server.GetDatabases() {
+	for _, db := range server.getDatabases() {
 		if err := server.initDatabase(ctx, db); err != nil {
 			return nil, trace.Wrap(err, "failed to initialize %v", server)
 		}
 	}
 
 	return server, nil
+}
+
+func (s *Server) initDynamicDatabases(ctx context.Context) error {
+	// TODO(r0mant): Filter by labels.
+	databases, err := s.cfg.AccessPoint.GetDatabases(ctx)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	for _, database := range databases {
+		if err := s.registerDatabase(ctx, database); err != nil {
+			return trace.Wrap(err)
+		}
+		s.log.Debugf("Registered %v.", database)
+	}
+	return nil
 }
 
 func (s *Server) initDatabase(ctx context.Context, database types.Database) error {
@@ -201,6 +232,12 @@ func (s *Server) initDatabase(ctx context.Context, database types.Database) erro
 		return trace.Wrap(err)
 	}
 	s.log.Debugf("Initialized %v.", database)
+	return nil
+}
+
+func (s *Server) deinitDatabase(ctx context.Context, name string) error {
+	s.stopDynamicLabels(ctx, name)
+	s.log.Debugf("Deinitialized database %q.", name)
 	return nil
 }
 
@@ -216,8 +253,131 @@ func (s *Server) initDynamicLabels(ctx context.Context, database types.Database)
 		return trace.Wrap(err)
 	}
 	dynamic.Sync()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.dynamicLabels[database.GetName()] = dynamic
 	return nil
+}
+
+func (s *Server) stopDynamicLabels(ctx context.Context, name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dynamic, ok := s.dynamicLabels[name]
+	if !ok {
+		return
+	}
+	delete(s.dynamicLabels, name)
+	dynamic.Close()
+}
+
+func (s *Server) initWatcher(ctx context.Context) error {
+	if len(s.cfg.Server.GetSelectors()) == 0 {
+		s.log.Debugf("Empty selector, not initializing database resource watcher.")
+		return nil
+	}
+	s.log.Debugf("Initializing database resource watcher with selector: %v.",
+		s.cfg.Server.GetSelectors())
+	watcher, err := s.cfg.AccessPoint.NewWatcher(ctx, types.Watch{
+		Name: "watch-databases",
+		Kinds: []types.WatchKind{
+			{
+				Kind: types.KindDatabase,
+			},
+		},
+	})
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	defer watcher.Close()
+Loop:
+	for {
+		select {
+		case event := <-watcher.Events():
+			switch event.Type {
+			case types.OpInit:
+				s.log.Infof("Databases watcher initialized...")
+				continue Loop
+			case types.OpPut:
+				r, ok := event.Resource.(*types.DatabaseV3)
+				if !ok {
+					return trace.BadParameter("unexpected resource type %T", event.Resource)
+				}
+				s.log.Infof("Detected new database resource: %v.", r)
+				// Match against selector to see if this agent needs to
+				// start proxying this database.
+				var match bool
+				for _, selector := range s.cfg.Server.GetSelectors() {
+					if len(selector.MatchLabels.Values) != 0 {
+						match, _, err = services.MatchLabels(types.LabelsFromProto(selector.MatchLabels), r.GetAllLabels())
+						if err != nil {
+							s.log.WithError(err).Error("Failed to match labels: %v.", r)
+							continue
+						}
+						if !match {
+							s.log.Infof("Selector %v didn't match: %v.", selector.MatchLabels, r)
+							continue
+						}
+						s.log.Infof("Selector %v matched, registering: %v.", selector.MatchLabels, r)
+						break
+					}
+				}
+				if match {
+					if err := s.registerDatabase(ctx, r); err != nil {
+						s.log.WithError(err).Errorf("Failed to register %v.", r)
+					}
+				}
+				// err := s.heartbeats[s.cfg.Server.GetName()].ForceSend(5 * time.Second)
+				// if err != nil {
+				// 	s.log.WithError(err).Error("Failed to force-send heartbeat.")
+				// }
+				continue Loop
+			case types.OpDelete:
+				s.log.Infof("Database resource deleted: %v.", event.Resource.GetName())
+				if err := s.deregisterDatabase(ctx, event.Resource.GetName()); err != nil {
+					s.log.WithError(err).Errorf("Failed to deregister database %q.", event.Resource.GetName())
+				}
+				// err := s.heartbeats[s.cfg.Server.GetName()].ForceSend(5 * time.Second)
+				// if err != nil {
+				// 	s.log.WithError(err).Error("Failed to force-send heartbeat.")
+				// }
+				continue Loop
+			default:
+				s.log.Warnf("Skipping unknown event type %s.", event.Type)
+			}
+		case <-watcher.Done():
+			return trace.Wrap(watcher.Error())
+		}
+	}
+}
+
+func (s *Server) registerDatabase(ctx context.Context, database types.Database) error {
+	if err := s.initDatabase(ctx, database); err != nil {
+		return trace.Wrap(err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.databases[database.GetName()] = database
+	return nil
+}
+
+func (s *Server) deregisterDatabase(ctx context.Context, name string) error {
+	if err := s.deinitDatabase(ctx, name); err != nil {
+		return trace.Wrap(err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.databases, name)
+	return nil
+}
+
+func (s *Server) getDatabases() []types.Database {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	databases := s.cfg.Server.GetDatabases()
+	for _, database := range s.databases {
+		databases = append(databases, database)
+	}
+	return databases
 }
 
 func (s *Server) initHeartbeat(ctx context.Context, server types.DatabaseServer) error {
@@ -245,11 +405,11 @@ func (s *Server) getServerInfoFunc(server types.DatabaseServer) func() (types.Re
 		// Make sure to return a new object, because it gets cached by
 		// heartbeat and will always compare as equal otherwise.
 		s.mu.RLock()
-		server = server.Copy()
+		server := server.Copy()
 		s.mu.RUnlock()
 		// Update dynamic labels.
-		databases := make([]types.Database, 0, len(server.GetDatabases()))
-		for _, database := range server.GetDatabases() {
+		var databases []types.Database
+		for _, database := range s.getDatabases() {
 			labels, ok := s.dynamicLabels[database.GetName()]
 			if ok {
 				database.SetDynamicLabels(labels.Get())
@@ -268,6 +428,7 @@ func (s *Server) getServerInfoFunc(server types.DatabaseServer) func() (types.Re
 		}
 		// Update TTL.
 		server.SetExpiry(s.cfg.Clock.Now().UTC().Add(apidefaults.ServerAnnounceTTL))
+		s.log.Debugf("Heartbeating server: %v.", server)
 		return server, nil
 	}
 }
@@ -453,14 +614,15 @@ func (s *Server) authorize(ctx context.Context) (*common.Session, error) {
 	s.log.Debugf("Client identity: %#v.", identity)
 	// Fetch the requested database server.
 	var database types.Database
-	for _, db := range s.cfg.Server.GetDatabases() {
+	registeredDatabases := s.getDatabases()
+	for _, db := range registeredDatabases {
 		if db.GetName() == identity.RouteToDatabase.ServiceName {
 			database = db
 		}
 	}
 	if database == nil {
 		return nil, trace.NotFound("%q not found among registered databases: %v",
-			identity.RouteToDatabase.ServiceName, s.cfg.Server.GetDatabases())
+			identity.RouteToDatabase.ServiceName, registeredDatabases)
 	}
 	s.log.Debugf("Will connect to database %q at %v.", database.GetName(),
 		database.GetURI())

@@ -2265,6 +2265,16 @@ func (a *Server) GetDatabaseServers(ctx context.Context, namespace string, opts 
 	return a.GetCache().GetDatabaseServers(ctx, namespace, opts...)
 }
 
+// GetDatabases returns all database resources.
+func (a *Server) GetDatabases(ctx context.Context) ([]types.Database, error) {
+	return a.GetCache().GetDatabases(ctx)
+}
+
+// GetDatabase returns the specified database resource.
+func (a *Server) GetDatabase(ctx context.Context, name string) (types.Database, error) {
+	return a.GetCache().GetDatabase(ctx, name)
+}
+
 func (a *Server) isMFARequired(ctx context.Context, checker services.AccessChecker, req *proto.IsMFARequiredRequest) (*proto.IsMFARequiredResponse, error) {
 	pref, err := a.GetAuthPreference(ctx)
 	if err != nil {

@@ -50,6 +50,8 @@ type DatabaseServer interface {
 	GetDatabases() []Database
 	// SetDatabases sets databases this database server proxies.
 	SetDatabases([]Database) error
+	// GetSelectors returns database resource selectors.
+	GetSelectors() []Selector
 }
 
 // NewDatabaseServerV3 creates a new database server instance.
@@ -149,6 +151,11 @@ func (s *DatabaseServerV3) SetRotation(r Rotation) {
 	s.Spec.Rotation = r
 }
 
+// GetSelectors returns database resource selectors.
+func (s *DatabaseServerV3) GetSelectors() []Selector {
+	return s.Spec.Selectors
+}
+
 // GetDatabases returns databases this database server proxies.
 func (s *DatabaseServerV3) GetDatabases() (databases []Database) {
 	if len(s.Spec.Databases) > 0 {
@@ -200,8 +207,16 @@ func (s *DatabaseServerV3) SetDatabases(databases []Database) error {
 
 // String returns the server string representation.
 func (s *DatabaseServerV3) String() string {
-	return fmt.Sprintf("DatabaseServer(Name=%v, Version=%v, Hostname=%v, HostID=%v, Databases=%v)",
-		s.GetName(), s.GetTeleportVersion(), s.GetHostname(), s.GetHostID(), s.GetDatabases())
+	return fmt.Sprintf("DatabaseServer(Name=%v, Version=%v, Hostname=%v, HostID=%v, Databases=%v, Selectors=%v)",
+		s.GetName(), s.GetTeleportVersion(), s.GetHostname(), s.GetHostID(), s.GetDatabases(), s.GetSelectors())
+}
+
+// String returns the selector string representation.
+func (s Selector) String() string {
+	if len(s.MatchLabels.Values) != 0 {
+		return fmt.Sprintf("MatchLabels(%v)", LabelsFromProto(s.MatchLabels))
+	}
+	return ""
 }
 
 // setStaticFields sets static resource header and metadata fields.
