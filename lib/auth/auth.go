@@ -108,6 +108,9 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 	if cfg.Restrictions == nil {
 		cfg.Restrictions = local.NewRestrictionsService(cfg.Backend)
 	}
+	if cfg.Databases == nil {
+		cfg.Databases = local.NewDatabasesService(cfg.Backend)
+	}
 	if cfg.Events == nil {
 		cfg.Events = local.NewEventsService(cfg.Backend, cfg.ClusterConfiguration.GetClusterConfig)
 	}
@@ -151,6 +154,7 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 			DynamicAccessExt:     cfg.DynamicAccessExt,
 			ClusterConfiguration: cfg.ClusterConfiguration,
 			Restrictions:         cfg.Restrictions,
+			Databases:            cfg.Databases,
 			IAuditLog:            cfg.AuditLog,
 			Events:               cfg.Events,
 		},
@@ -174,6 +178,7 @@ type Services struct {
 	services.DynamicAccessExt
 	services.ClusterConfiguration
 	services.Restrictions
+	services.Databases
 	types.Events
 	events.IAuditLog
 }
