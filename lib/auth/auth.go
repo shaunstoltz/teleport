@@ -121,6 +121,12 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 	if cfg.Streamer == nil {
 		cfg.Streamer = events.NewDiscardEmitter()
 	}
+	if cfg.KeyStoreConfig.RSAKeyPairSource == nil {
+		cfg.KeyStoreConfig.RSAKeyPairSource = cfg.Authority.GenerateKeyPair
+	}
+	if cfg.KeyStoreConfig.HostUUID == "" {
+		cfg.KeyStoreConfig.HostUUID = cfg.HostUUID
+	}
 
 	limiter, err := limiter.NewConnectionsLimiter(limiter.Config{
 		MaxConnections: defaults.LimiterMaxConcurrentSignatures,
@@ -129,10 +135,10 @@ func NewServer(cfg *InitConfig, opts ...ServerOption) (*Server, error) {
 		return nil, trace.Wrap(err)
 	}
 
-	// TODO(nic): update this with real keystore config
-	keyStore := keystore.NewRawKeyStore(&keystore.RawConfig{
-		RSAKeyPairSource: cfg.Authority.GenerateKeyPair,
-	})
+	keyStore, err := keystore.NewKeyStore(cfg.KeyStoreConfig)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
 
 	closeCtx, cancelFunc := context.WithCancel(context.TODO())
 	as := Server{
@@ -331,7 +337,7 @@ func (a *Server) runPeriodicOperations() {
 	r := rand.New(rand.NewSource(a.GetClock().Now().UnixNano()))
 	period := defaults.HighResPollingPeriod + time.Duration(r.Intn(int(defaults.HighResPollingPeriod/time.Second)))*time.Second
 	log.Debugf("Ticking with period: %v.", period)
-	ticker := time.NewTicker(period)
+	ticker := a.clock.NewTicker(period)
 	// Create a ticker with jitter
 	heartbeatCheckTicker := interval.New(interval.Config{
 		Duration: apidefaults.ServerKeepAliveTTL * 2,
@@ -344,7 +350,7 @@ func (a *Server) runPeriodicOperations() {
 		select {
 		case <-a.closeCtx.Done():
 			return
-		case <-ticker.C:
+		case <-ticker.Chan():
 			err := a.autoRotateCertAuthorities()
 			if err != nil {
 				if trace.IsCompareFailed(err) {

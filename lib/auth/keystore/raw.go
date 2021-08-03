@@ -106,3 +106,30 @@ func (c *rawKeyStore) GetJWTSigner(ca types.CertAuthority) (crypto.Signer, error
 func (c *rawKeyStore) DeleteKey(rawKey []byte) error {
 	return nil
 }
+
+func (c *rawKeyStore) keySetHasLocalKeys(keySet types.CAKeySet) bool {
+	for _, sshKeyPair := range keySet.SSH {
+		if sshKeyPair.PrivateKeyType == types.PrivateKeyType_RAW {
+			return true
+		}
+	}
+	for _, tlsKeyPair := range keySet.TLS {
+		if tlsKeyPair.KeyType == types.PrivateKeyType_RAW {
+			return true
+		}
+	}
+	for _, jwtKeyPair := range keySet.JWT {
+		if jwtKeyPair.PrivateKeyType == types.PrivateKeyType_RAW {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *rawKeyStore) HasLocalActiveKeys(ca types.CertAuthority) bool {
+	return c.keySetHasLocalKeys(ca.GetActiveKeys())
+}
+
+func (c *rawKeyStore) HasLocalAdditionalKeys(ca types.CertAuthority) bool {
+	return c.keySetHasLocalKeys(ca.GetAdditionalTrustedKeys())
+}

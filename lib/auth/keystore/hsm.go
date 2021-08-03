@@ -26,6 +26,7 @@ import (
 	"github.com/gravitational/teleport/api/types"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/trace"
+	"github.com/siddontang/go-log/log"
 
 	"github.com/ThalesIgnite/crypto11"
 	"github.com/google/uuid"
@@ -113,6 +114,7 @@ func (c *hsmKeyStore) findUnusedID() (uuid.UUID, error) {
 // crypto.Signer. The returned identifier can be passed to GetSigner later to
 // get the same crypto.Signer.
 func (c *hsmKeyStore) GenerateRSA() ([]byte, crypto.Signer, error) {
+	log.Debug("Creating new HSM keypair")
 	id, err := c.findUnusedID()
 	if err != nil {
 		return nil, nil, trace.Wrap(err)
@@ -280,6 +282,54 @@ func (c *hsmKeyStore) DeleteKey(rawKey []byte) error {
 		return trace.NotFound("failed to find keypair for given id")
 	}
 	return trace.Wrap(signer.Delete())
+}
+
+func (c *hsmKeyStore) keySetHasLocalKeys(keySet types.CAKeySet) bool {
+	for _, sshKeyPair := range keySet.SSH {
+		if sshKeyPair.PrivateKeyType != types.PrivateKeyType_PKCS11 {
+			continue
+		}
+		keyID, err := parseKeyID(sshKeyPair.PrivateKey)
+		if err != nil {
+			continue
+		}
+		if keyID.HostID == c.hostUUID {
+			return true
+		}
+	}
+	for _, tlsKeyPair := range keySet.TLS {
+		if tlsKeyPair.KeyType != types.PrivateKeyType_PKCS11 {
+			continue
+		}
+		keyID, err := parseKeyID(tlsKeyPair.Key)
+		if err != nil {
+			continue
+		}
+		if keyID.HostID == c.hostUUID {
+			return true
+		}
+	}
+	for _, jwtKeyPair := range keySet.JWT {
+		if jwtKeyPair.PrivateKeyType != types.PrivateKeyType_PKCS11 {
+			continue
+		}
+		keyID, err := parseKeyID(jwtKeyPair.PrivateKey)
+		if err != nil {
+			continue
+		}
+		if keyID.HostID == c.hostUUID {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *hsmKeyStore) HasLocalActiveKeys(ca types.CertAuthority) bool {
+	return c.keySetHasLocalKeys(ca.GetActiveKeys())
+}
+
+func (c *hsmKeyStore) HasLocalAdditionalKeys(ca types.CertAuthority) bool {
+	return c.keySetHasLocalKeys(ca.GetAdditionalTrustedKeys())
 }
 
 type keyID struct {

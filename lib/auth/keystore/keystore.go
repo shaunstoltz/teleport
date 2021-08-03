@@ -19,10 +19,13 @@ package keystore
 import (
 	"bytes"
 	"crypto"
+	"fmt"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/gravitational/teleport/api/types"
+
+	"github.com/gravitational/trace"
 )
 
 var pkcs11Prefix = []byte("pkcs11:")
@@ -48,6 +51,44 @@ type KeyStore interface {
 
 	// DeleteKey deletes the given key from the KeyStore
 	DeleteKey(keyID []byte) error
+
+	HasLocalActiveKeys(ca types.CertAuthority) bool
+	HasLocalAdditionalKeys(ca types.CertAuthority) bool
+}
+
+type Config struct {
+	// RSAKeyPairSource is a function which returns raw keypairs to be used if
+	// an hsm is not configured
+	RSAKeyPairSource RSAKeyPairSource
+
+	// Path is the path to the PKCS11 module.
+	Path string
+	// SlotNumber points to the PKCS11 slot to use, or nil if slot is unused.
+	SlotNumber *int
+	// TokenLabel is the label of the PKCS11 token to use.
+	TokenLabel string
+	// Pin is the PKCS11 pin for the given token.
+	Pin string
+	// HostUUID is the UUID of the local auth server this HSM is connected to.
+	HostUUID string
+}
+
+func NewKeyStore(cfg Config) (KeyStore, error) {
+	if cfg.Path == "" {
+		if cfg.RSAKeyPairSource == nil {
+			return nil, trace.BadParameter("must provide one of Path or RSAKeyPairSource")
+		}
+		fmt.Println("Creating RAW keystore")
+		return NewRawKeyStore(&RawConfig{cfg.RSAKeyPairSource}), nil
+	}
+	fmt.Println("Creating HSM keystore")
+	return NewHSMKeyStore(&HSMConfig{
+		Path:       cfg.Path,
+		SlotNumber: cfg.SlotNumber,
+		TokenLabel: cfg.TokenLabel,
+		Pin:        cfg.Pin,
+		HostUUID:   cfg.HostUUID,
+	})
 }
 
 // KeyType returns the type of the given private key.

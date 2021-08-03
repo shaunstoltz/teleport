@@ -18,6 +18,7 @@ package auth
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
@@ -62,6 +63,10 @@ type InitConfig struct {
 
 	// Authority is key generator that we use
 	Authority sshca.Authority
+
+	// KeyStoreConfig is the config for the KeyStore which handles private CA
+	// keys that may be held in an HSM.
+	KeyStoreConfig keystore.Config
 
 	// HostUUID is a UUID of this host
 	HostUUID string
@@ -319,57 +324,38 @@ func Init(cfg InitConfig, opts ...ServerOption) (*Server, error) {
 		log.Infof("Created default admin role: %q.", defaultRole.GetName())
 	}
 
-	// generate a user certificate authority if it doesn't exist
-	_, err = asrv.GetCertAuthority(types.CertAuthID{DomainName: cfg.ClusterName.GetClusterName(), Type: types.UserCA}, true)
-	if err != nil {
-		if !trace.IsNotFound(err) {
-			return nil, trace.Wrap(err)
-		}
-
-		log.Infof("First start: generating user certificate authority.")
-		userCA, err := generateSelfSignedCA(&cfg, asrv.keyStore, types.UserCA)
+	// generate certificate authorities if they don't exist
+	userCAID := types.CertAuthID{DomainName: cfg.ClusterName.GetClusterName(), Type: types.UserCA}
+	hostCAID := types.CertAuthID{DomainName: cfg.ClusterName.GetClusterName(), Type: types.HostCA}
+	jwtCAID := types.CertAuthID{DomainName: cfg.ClusterName.GetClusterName(), Type: types.JWTSigner}
+	for _, caID := range []types.CertAuthID{userCAID, hostCAID, jwtCAID} {
+		ca, err := asrv.GetCertAuthority(caID, true)
 		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-		if err := asrv.Trust.UpsertCertAuthority(userCA); err != nil {
-			return nil, trace.Wrap(err)
-		}
-	}
-
-	// generate a host certificate authority if it doesn't exist
-	_, err = asrv.GetCertAuthority(types.CertAuthID{DomainName: cfg.ClusterName.GetClusterName(), Type: types.HostCA}, true)
-	if err != nil {
-		if !trace.IsNotFound(err) {
-			return nil, trace.Wrap(err)
-		}
-
-		log.Infof("First start: generating host certificate authority.")
-		hostCA, err := generateSelfSignedCA(&cfg, asrv.keyStore, types.HostCA)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-		if err := asrv.Trust.UpsertCertAuthority(hostCA); err != nil {
-			return nil, trace.Wrap(err)
-		}
-	}
-
-	// If a JWT signer does not exist for this cluster, create one.
-	_, err = asrv.GetCertAuthority(types.CertAuthID{
-		DomainName: cfg.ClusterName.GetClusterName(),
-		Type:       types.JWTSigner,
-	}, true)
-	if err != nil && !trace.IsNotFound(err) {
-		return nil, trace.Wrap(err)
-	}
-	if trace.IsNotFound(err) {
-		log.Infof("Migrate: Adding JWT key to existing cluster %q.", cfg.ClusterName.GetClusterName())
-
-		jwtSigner, err := services.NewJWTAuthority(cfg.ClusterName.GetClusterName(), asrv.keyStore)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-		if err := asrv.Trust.UpsertCertAuthority(jwtSigner); err != nil {
-			return nil, trace.Wrap(err)
+			if !trace.IsNotFound(err) {
+				return nil, trace.Wrap(err)
+			}
+			log.Infof("First start: generating %s certificate authority.", caID.Type)
+			if err := asrv.createSelfSignedCA(caID); err != nil {
+				return nil, trace.Wrap(err)
+			}
+		} else {
+			// already have a CA. Make sure the keyStore has local keys
+			if !asrv.keyStore.HasLocalActiveKeys(ca) {
+				log.Warnf("No local keys in %s CA, you must perform a CA rotation before routing traffic to this auth server", caID.Type)
+				log.Warnf("Adding local active keys to %s CA", caID.Type)
+				if err := asrv.AddLocalActiveKeys(ca); err != nil {
+					return nil, trace.Wrap(err)
+				}
+			} else {
+				log.Warnf("%s CA has local keys", caID.Type)
+			}
+			// add additional keys if starting up during init phase of rotation
+			if ca.GetRotation().Phase == types.RotationPhaseInit && !asrv.keyStore.HasLocalAdditionalKeys(ca) {
+				log.Debugf("Adding additional local keys to %s CA for init phase of CA rotation", caID.Type)
+				if err := asrv.AddLocalAdditionalKeys(ca); err != nil {
+					return nil, trace.Wrap(err)
+				}
+			}
 		}
 	}
 
@@ -402,62 +388,263 @@ func Init(cfg InitConfig, opts ...ServerOption) (*Server, error) {
 	return asrv, nil
 }
 
-func generateSelfSignedCA(cfg *InitConfig, keyStore keystore.KeyStore, caType types.CertAuthType) (*types.CertAuthorityV2, error) {
-	sshPrivateKey, sshCryptoSigner, err := keyStore.GenerateRSA()
+func sshKeyPairFromKey(keyStore keystore.KeyStore, key []byte, cryptoSigner crypto.Signer) (*types.SSHKeyPair, error) {
+	sshSigner, err := ssh.NewSignerFromSigner(cryptoSigner)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	keyType := keystore.KeyType(sshPrivateKey)
-	sshSigner, err := ssh.NewSignerFromSigner(sshCryptoSigner)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	sshPublicKey := ssh.MarshalAuthorizedKey(sshSigner.PublicKey())
+	publicKey := ssh.MarshalAuthorizedKey(sshSigner.PublicKey())
+	return &types.SSHKeyPair{
+		PublicKey:      publicKey,
+		PrivateKey:     key,
+		PrivateKeyType: keystore.KeyType(key),
+	}, nil
+}
 
-	tlsPrivateKey, tlsSigner, err := keyStore.GenerateRSA()
+func newSSHKeyPair(keyStore keystore.KeyStore) (*types.SSHKeyPair, func() error, error) {
+	sshKey, signer, err := keyStore.GenerateRSA()
 	if err != nil {
-		return nil, trace.Wrap(err)
+		return nil, nil, trace.Wrap(err)
 	}
+	cleanup := func() error {
+		return trace.Wrap(keyStore.DeleteKey(sshKey))
+	}
+	sshKeyPair, err := sshKeyPairFromKey(keyStore, sshKey, signer)
+	if err != nil {
+		return nil, nil, trace.NewAggregate(err, cleanup())
+	}
+	return sshKeyPair, cleanup, nil
+}
+
+func tlsKeyPairFromKey(keyStore keystore.KeyStore, key []byte, signer crypto.Signer, clusterName string) (*types.TLSKeyPair, error) {
 	tlsCert, err := tlsca.GenerateSelfSignedCAWithSigner(
-		tlsSigner,
+		signer,
 		pkix.Name{
-			CommonName:   cfg.ClusterName.GetClusterName(),
-			Organization: []string{cfg.ClusterName.GetClusterName()},
+			CommonName:   clusterName,
+			Organization: []string{clusterName},
 		}, nil, defaults.CATTL)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
+	return &types.TLSKeyPair{
+		Cert:    tlsCert,
+		Key:     key,
+		KeyType: keystore.KeyType(key),
+	}, nil
+}
 
-	sigAlg := defaults.CASignatureAlgorithm
-	if cfg.CASigningAlg != nil && *cfg.CASigningAlg != "" {
-		sigAlg = *cfg.CASigningAlg
+func newTLSKeyPair(keyStore keystore.KeyStore, clusterName string) (*types.TLSKeyPair, func() error, error) {
+	tlsKey, signer, err := keyStore.GenerateRSA()
+	if err != nil {
+		return nil, nil, trace.Wrap(err)
+	}
+	cleanup := func() error {
+		return trace.Wrap(keyStore.DeleteKey(tlsKey))
+	}
+	tlsKeyPair, err := tlsKeyPairFromKey(keyStore, tlsKey, signer, clusterName)
+	if err != nil {
+		return nil, nil, trace.NewAggregate(err, cleanup())
+	}
+	return tlsKeyPair, cleanup, nil
+}
+
+func jwtKeyPairFromKey(keyStore keystore.KeyStore, key []byte, signer crypto.Signer) (*types.JWTKeyPair, error) {
+	publicKey, err := utils.MarshalPublicKey(signer)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return &types.JWTKeyPair{
+		PublicKey:      publicKey,
+		PrivateKey:     key,
+		PrivateKeyType: keystore.KeyType(key),
+	}, nil
+}
+
+func newJWTKeyPair(keyStore keystore.KeyStore) (*types.JWTKeyPair, func() error, error) {
+	jwtKey, signer, err := keyStore.GenerateRSA()
+	if err != nil {
+		return nil, nil, trace.Wrap(err)
+	}
+	cleanup := func() error {
+		return trace.Wrap(keyStore.DeleteKey(jwtKey))
+	}
+	jwtKeyPair, err := jwtKeyPairFromKey(keyStore, jwtKey, signer)
+	if err != nil {
+		return nil, nil, trace.NewAggregate(err, cleanup())
+	}
+	return jwtKeyPair, cleanup, nil
+}
+
+// newKeySetForKeySet returns a new CAKeySet with local keys of the same types
+// (SSH, TLS, or JWT) as the argument keySet
+func newKeySetForKeySet(keyStore keystore.KeyStore, clusterName string, keySet types.CAKeySet) (types.CAKeySet, func() error, error) {
+	compose := func(a func() error, b func() error) func() error {
+		return func() error {
+			return trace.NewAggregate(a(), b())
+		}
+	}
+	cleanup := func() error { return nil }
+	var newKeySet types.CAKeySet
+	if len(keySet.SSH) != 0 {
+		sshKeyPair, sshCleanup, err := newSSHKeyPair(keyStore)
+		if err != nil {
+			return newKeySet, nil, trace.Wrap(err)
+		}
+		newKeySet.SSH = append(newKeySet.SSH, sshKeyPair)
+		cleanup = sshCleanup
+	}
+	if len(keySet.TLS) != 0 {
+		tlsKeyPair, tlsCleanup, err := newTLSKeyPair(keyStore, clusterName)
+		if err != nil {
+			return newKeySet, nil, trace.NewAggregate(err, cleanup())
+		}
+		newKeySet.TLS = append(newKeySet.TLS, tlsKeyPair)
+		cleanup = compose(cleanup, tlsCleanup)
+	}
+	if len(keySet.JWT) != 0 {
+		jwtKeyPair, jwtCleanup, err := newJWTKeyPair(keyStore)
+		if err != nil {
+			return newKeySet, nil, trace.NewAggregate(err, cleanup())
+		}
+		newKeySet.JWT = append(newKeySet.JWT, jwtKeyPair)
+		cleanup = compose(cleanup, jwtCleanup)
+	}
+	return newKeySet, cleanup, nil
+}
+
+// mergeKeySet adds keys from newKeys to base
+func mergeKeySet(base *types.CAKeySet, newKeys types.CAKeySet) {
+	base.SSH = append(base.SSH, newKeys.SSH...)
+	base.TLS = append(base.TLS, newKeys.TLS...)
+	base.JWT = append(base.JWT, newKeys.JWT...)
+}
+
+func atomicCAUpdate(
+	trust services.Trust,
+	currentCA types.CertAuthority,
+	newKeys types.CAKeySet,
+	getKeySet func(types.CertAuthority) types.CAKeySet,
+	setKeySet func(types.CertAuthority, types.CAKeySet) error,
+	needsUpdate func(types.CertAuthority) bool,
+	cleanup func() error) error {
+	for {
+		newCA := currentCA.Clone()
+		currentKeySet := getKeySet(newCA)
+		mergeKeySet(&currentKeySet, newKeys.Clone())
+		if err := setKeySet(newCA, currentKeySet); err != nil {
+			return trace.NewAggregate(err, cleanup())
+		}
+
+		err := trust.CompareAndSwapCertAuthority(newCA, currentCA)
+		if err != nil && !trace.IsCompareFailed(err) {
+			return trace.NewAggregate(err, cleanup())
+		}
+		if err == nil {
+			// success!
+			return nil
+		}
+
+		// CA was concurrently updated, loop
+		currentCA, err = trust.GetCertAuthority(currentCA.GetID(), true)
+		if err != nil {
+			return trace.NewAggregate(err, cleanup())
+		}
+		if !needsUpdate(currentCA) {
+			// someone else added local keys for us?
+			return trace.Wrap(cleanup())
+		}
+	}
+}
+
+func (a *Server) AddLocalActiveKeys(ca types.CertAuthority) error {
+	if a.keyStore.HasLocalActiveKeys(ca) {
+		// nothing to do
+		return nil
 	}
 
-	return &types.CertAuthorityV2{
-		Kind:    types.KindCertAuthority,
-		Version: types.V2,
-		Metadata: types.Metadata{
-			Name:      cfg.ClusterName.GetClusterName(),
-			Namespace: apidefaults.Namespace,
-		},
-		Spec: types.CertAuthoritySpecV2{
-			ClusterName: cfg.ClusterName.GetClusterName(),
-			Type:        caType,
-			ActiveKeys: types.CAKeySet{
-				SSH: []*types.SSHKeyPair{{
-					PublicKey:      sshPublicKey,
-					PrivateKey:     sshPrivateKey,
-					PrivateKeyType: keyType,
-				}},
-				TLS: []*types.TLSKeyPair{{
-					Cert:    tlsCert,
-					Key:     tlsPrivateKey,
-					KeyType: keyType,
-				}},
-			},
-			SigningAlg: sshutils.ParseSigningAlg(sigAlg),
-		},
-	}, nil
+	newKeySet, cleanup, err := newKeySetForKeySet(a.keyStore, ca.GetClusterName(), ca.GetActiveKeys())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
+	err = atomicCAUpdate(a.Trust, ca, newKeySet,
+		func(ca types.CertAuthority) types.CAKeySet { return ca.GetActiveKeys() },
+		func(ca types.CertAuthority, keySet types.CAKeySet) error { return ca.SetActiveKeys(keySet) },
+		func(ca types.CertAuthority) bool { return !a.keyStore.HasLocalActiveKeys(ca) },
+		cleanup)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	log.Debugf("Succesfully added local active keys to %s CA", ca.GetType())
+	return nil
+}
+
+func (a *Server) AddLocalAdditionalKeys(ca types.CertAuthority) error {
+	if a.keyStore.HasLocalAdditionalKeys(ca) {
+		// nothing to do
+		return nil
+	}
+
+	newKeySet, cleanup, err := newKeySetForKeySet(a.keyStore, ca.GetClusterName(), ca.GetAdditionalTrustedKeys())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
+	err = atomicCAUpdate(a.Trust, ca, newKeySet,
+		func(ca types.CertAuthority) types.CAKeySet { return ca.GetAdditionalTrustedKeys() },
+		func(ca types.CertAuthority, keySet types.CAKeySet) error { return ca.SetAdditionalTrustedKeys(keySet) },
+		func(ca types.CertAuthority) bool { return !a.keyStore.HasLocalAdditionalKeys(ca) },
+		cleanup)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	log.Debugf("Succesfully added local additional keys to %s CA", ca.GetType())
+	return nil
+}
+
+func (a *Server) createSelfSignedCA(caID types.CertAuthID) error {
+	var keySet types.CAKeySet
+	cleanup := func() error { return nil }
+	switch caID.Type {
+	case types.UserCA, types.HostCA:
+		sshKeyPair, sshCleanup, err := newSSHKeyPair(a.keyStore)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		tlsKeyPair, tlsCleanup, err := newTLSKeyPair(a.keyStore, caID.DomainName)
+		if err != nil {
+			return trace.NewAggregate(err, sshCleanup())
+		}
+		cleanup = func() error { return trace.NewAggregate(sshCleanup(), tlsCleanup()) }
+		keySet.SSH = append(keySet.SSH, sshKeyPair)
+		keySet.TLS = append(keySet.TLS, tlsKeyPair)
+	case types.JWTSigner:
+		jwtKeyPair, jwtCleanup, err := newJWTKeyPair(a.keyStore)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		cleanup = jwtCleanup
+		keySet.JWT = append(keySet.JWT, jwtKeyPair)
+	default:
+		return trace.BadParameter("unknown ca type: %s", caID.Type)
+	}
+	sigAlg := defaults.CASignatureAlgorithm
+	if a.caSigningAlg != nil && *a.caSigningAlg != "" {
+		sigAlg = *a.caSigningAlg
+	}
+	ca, err := types.NewCertAuthority(types.CertAuthoritySpecV2{
+		Type:        caID.Type,
+		ClusterName: caID.DomainName,
+		ActiveKeys:  keySet,
+		SigningAlg:  sshutils.ParseSigningAlg(sigAlg),
+	})
+	if err != nil {
+		return trace.NewAggregate(err, cleanup())
+	}
+	if err := a.Trust.CreateCertAuthority(ca); err != nil {
+		return trace.NewAggregate(err, cleanup())
+	}
+	return nil
 }
 
 func initSetAuthPreference(ctx context.Context, asrv *Server, newAuthPref types.AuthPreference) error {

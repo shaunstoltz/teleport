@@ -19,6 +19,7 @@ package auth
 import (
 	"crypto/rsa"
 	"crypto/x509/pkix"
+	"fmt"
 	"time"
 
 	"github.com/gravitational/teleport/api/types"
@@ -317,6 +318,14 @@ func (a *Server) autoRotate(ca types.CertAuthority) error {
 	rotation := ca.GetRotation()
 	// rotation mode is not automatic, nothing to do
 	if rotation.Mode != types.RotationModeAuto {
+		fmt.Println("NIC autoRotate")
+		fmt.Println(a.AuthServiceName, rotation.State, rotation.Phase, a.keyStore.HasLocalAdditionalKeys(ca), ca.GetType())
+		if rotation.State == types.RotationStateInProgress &&
+			rotation.Phase == types.RotationPhaseInit &&
+			!a.keyStore.HasLocalAdditionalKeys(ca) {
+			fmt.Println("NIC autoRotate addlocalkeys")
+			return trace.Wrap(a.AddLocalAdditionalKeys(ca))
+		}
 		return nil
 	}
 	// rotation is not in progress, there is nothing to do
