@@ -221,6 +221,7 @@ func TestFormatAccountName(t *testing.T) {
 }
 
 func TestCreateRecoveryToken(t *testing.T) {
+	t.Parallel()
 	srv := newTestTLSServer(t)
 
 	username := "joe@example.com"
