@@ -41,7 +41,7 @@ Below is a table of principles and common points of focus listed by [AICPA’s o
 Each principle has many “Points of Focus” which will apply differently to different products and organizations, talk to an auditor to understand exactly which points of focus apply to your organization.
 
 
-| **Principle Criteria** | **Point of Focus** | **Teleport Features** |  |  |  |  |
+| **Principle Criteria** | **Point of Focus** | **Teleport Features** |
 | --- | --- | --- | --- | --- | --- | --- |
 | CC6.1 - Restricts Logical Access | Logical access to information assets, including hardware, data (at-rest, during processing, or in transmission), software, administrative authorities, mobile devices, output, and offline system components is restricted through the use of access control software and rule sets. | Teleport Enterprise supports robust [Role-based Access Controls (RBAC)](https://gravitational.com/teleport/docs/enterprise/ssh_rbac/) to: | • Control which SSH nodes a user can or cannot access. | • Control cluster level configuration (session recording, configuration, etc.) | • Control which UNIX logins a user is allowed to use when logging into a server. |  |
 | CC6.1 - Identifies and Authenticates Users | Persons, infrastructure, and software are identified and authenticated prior to accessing information assets, whether locally or remotely. | Provide role-based access controls (RBAC) using short-lived certificates and your existing identity management service. Connecting locally or remotely is just as easy. |  |  |  |  |
