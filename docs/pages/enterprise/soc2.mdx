@@ -1,49 +1,6 @@
----
-title: SOC2 compliance for SSH, Kubernetes and Applications
-description: How to configure SSH, Kubernetes and Application access to be SOC2 compliant
-h1: SOC2 Compliance for SSH and Kubernetes and Application Access
----
-
-Teleport is designed to meet SOC2 requirements for the purposes of accessing infrastructure, change management and system operations. This document outlines a high
-level overview of how Teleport can be used to help your company to become SOC2 certified.
-
-# Achieving SOC2 Compliance with Teleport
-SOC2 or Service Organization Controls were developed by the American Institute of CPAs (AICPA). They are based on five trust service areas: security, availability, processing integrity, confidentiality and privacy. 
-
-# What Key SOC2 Controls does Teleport help achieve?
-Teleport helps with 4 of the 9 control areas.
-
-## CC6 Control Activities
-Teleport helps with separation of duties using RBAC and restricts access to authorized users
-- Provide role-based access controls (RBAC) using short-lived certificates and your existing identity management service.
-
-## CC6 Physical and Logical Access controls
-Teleport issues temporary security credentials according to the user's role.
-
-## CC7 System Operations
-Teleport helps audit and monitor access.
- 
-- Audit events and session recordings are securely stored in a vault to prevent tampering.
-- Convert logins, executed commands, deployments and other events into structured audit logs.
-- Monitor, share and join interactive sessions in real-time from the CLI or browser.
-
-## CC8 Change Management
-Teleport helps users elevate their permissions during incidents, RBAC helps limit the need for approvals. The Teleport slack integration allows for managers to quickly approve temporary SSH access requests.
-
-- Let engineers request elevated permissions on the fly without ever leaving the terminal
-- Approve or deny permission requests with ChatOps workflow via Slack or other supported platforms.
-- Extend and customize permission elevation workflow with a simple API and extendable plugin system.
-
-# What Specific Criteria does Teleport Help Statisfy? 
-
-Below is a table of principles and common points of focus listed by [AICPA’s official “trust Service Criteria” Document](https://www.aicpa.org/content/dam/aicpa/interestareas/frc/assuranceadvisoryservices/downloadabledocuments/trust-services-criteria.pdf) and how Teleport helps satisfy them.
-
-Each principle has many “Points of Focus” which will apply differently to different products and organizations, talk to an auditor to understand exactly which points of focus apply to your organization.
-
-
 | **Principle Criteria** | **Point of Focus** | **Teleport Features** |
 | --- | --- | --- | --- | --- | --- | --- |
-| CC6.1 - Restricts Logical Access | Logical access to information assets, including hardware, data (at-rest, during processing, or in transmission), software, administrative authorities, mobile devices, output, and offline system components is restricted through the use of access control software and rule sets. | Teleport Enterprise supports robust [Role-based Access Controls (RBAC)](https://gravitational.com/teleport/docs/enterprise/ssh_rbac/) to: | • Control which SSH nodes a user can or cannot access. | • Control cluster level configuration (session recording, configuration, etc.) | • Control which UNIX logins a user is allowed to use when logging into a server. |  |
+| CC6.1 - Restricts Logical Access | Logical access to information assets, including hardware, data (at-rest, during processing, or in transmission), software, administrative authorities, mobile devices, output, and offline system components is restricted through the use of access control software and rule sets. | Teleport Enterprise supports robust [Role-based Access Controls (RBAC)](https://gravitational.com/teleport/docs/enterprise/ssh_rbac/) to: <ul><li>  Control which SSH nodes a user can or cannot access. </li><li> Control cluster level configuration (session recording, configuration, etc.) </li><li> Control which UNIX logins a user is allowed to use when logging into a server. </ul> |
 | CC6.1 - Identifies and Authenticates Users | Persons, infrastructure, and software are identified and authenticated prior to accessing information assets, whether locally or remotely. | Provide role-based access controls (RBAC) using short-lived certificates and your existing identity management service. Connecting locally or remotely is just as easy. |  |  |  |  |
 | CC6.1 - Considers Network Segmentation | Network segmentation permits unrelated portions of the entity&#39;s information system to be isolated from each other. | [Teleport enables beyond corp network segmentation](https://gravitational.com/teleport/docs/trustedclusters/#trusted-clusters) | [Connect to nodes behind Firewalls or create reverse tunnels to a proxy server](https://gravitational.com/teleport/docs/faq/#can-i-connect-to-nodes-behind-a-firewall) |  |  |  |
 | CC6.1 - Manages Points of Access | Points of access by outside entities and the types of data that flow through the points of access are identified, inventoried, and managed. The types of individuals and systems using each point of access are identified, documented, and managed. | [Label Nodes to inventory and create rules](https://gravitational.com/teleport/docs/admin-guide/#labeling-nodes) | [Create Labels from AWS Tags](https://gravitational.com/teleport/docs/aws_oss_guide/#generating-labels-from-aws-tags) | Teleport maintains a live list of all nodes within a cluster. This node list can be queried by users (who see a subset they have access to) and administrators any time. |  |  |
