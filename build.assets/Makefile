@@ -9,6 +9,7 @@ SRCDIR=/go/src/github.com/gravitational/teleport
 GOMODCACHE ?= /tmp/gomodcache
 DOCKERFLAGS := --rm=true -v "$$(pwd)/../":$(SRCDIR) -v /tmp:/tmp -w $(SRCDIR) -h $(HOSTNAME) -e GOMODCACHE=$(GOMODCACHE)
 ADDFLAGS ?=
+ADD_LDFLAGS = -L/opt/lib
 BATSFLAGS :=
 NOROOT=-u $$(id -u):$$(id -g)
 KUBECONFIG ?=
@@ -18,7 +19,7 @@ OS ?= linux
 ARCH ?= amd64
 RUNTIME ?= go1.16.2
 BORINGCRYPTO_RUNTIME=$(RUNTIME)b7
-LIBBPF_VERSION ?= 0.3
+LIBBPF_VERSION ?= 0.3.1
 
 UID := $$(id -u)
 GID := $$(id -g)
@@ -74,7 +75,7 @@ build: buildbox
 .PHONY:build-binaries
 build-binaries: buildbox
 	docker run $(DOCKERFLAGS) $(NOROOT) $(BUILDBOX) \
-		make -C $(SRCDIR) ADDFLAGS='$(ADDFLAGS)' full
+		make -C $(SRCDIR) ADDFLAGS='$(ADDFLAGS)' ADD_LDFLAGS=$(ADD_LDFLAGS) full
 
 #
 # Build 'teleport' Enterprise release inside a docker container
@@ -82,7 +83,7 @@ build-binaries: buildbox
 .PHONY:build-enterprise-binaries
 build-enterprise-binaries: buildbox
 	docker run $(DOCKERFLAGS) $(NOROOT) $(BUILDBOX) \
-		make -C $(SRCDIR)/e ADDFLAGS='$(ADDFLAGS)' VERSION=$(VERSION) GITTAG=v$(VERSION) full
+		make -C $(SRCDIR)/e ADDFLAGS='$(ADDFLAGS)' ADD_LDFLAGS=$(ADD_LDFLAGS) VERSION=$(VERSION) GITTAG=v$(VERSION) full
 
 #
 # Build 'teleport' FIPS release inside a docker container
@@ -91,7 +92,7 @@ build-enterprise-binaries: buildbox
 .PHONY:build-binaries-fips
 build-binaries-fips: buildbox-fips
 	docker run $(DOCKERFLAGS) $(NOROOT) $(BUILDBOX_FIPS) \
-		make -C $(SRCDIR)/e ADDFLAGS='$(ADDFLAGS)' VERSION=$(VERSION) GITTAG=v$(VERSION) FIPS=yes full
+		make -C $(SRCDIR)/e ADDFLAGS='$(ADDFLAGS)' ADD_LDFLAGS=$(ADD_LDFLAGS) VERSION=$(VERSION) GITTAG=v$(VERSION) FIPS=yes full
 
 #
 # Builds a Docker container which is used for building official Teleport binaries
@@ -256,16 +257,16 @@ enter: buildbox
 .PHONY:release
 release: buildbox
 	docker run $(DOCKERFLAGS) $(NOROOT) $(BUILDBOX_NAME) \
-		/usr/bin/make release -e ADDFLAGS="$(ADDFLAGS)" OS=$(OS) ARCH=$(ARCH) RUNTIME=$(RUNTIME)
+		/usr/bin/make release -e ADDFLAGS="$(ADDFLAGS)" OS=$(OS) ARCH=$(ARCH) RUNTIME=$(RUNTIME) ADD_LDFLAGS=$(ADD_LDFLAGS)
 
 # These are aliases used to make build commands uniform.
 .PHONY: release-amd64
 release-amd64:
-	$(MAKE) release ARCH=amd64
+	$(MAKE) release ARCH=amd64 ADD_LDFLAGS=$(ADD_LDFLAGS)
 
 .PHONY: release-amd64-fips
 release-amd64-fips:
-	$(MAKE) release-fips ARCH=amd64 FIPS=yes BUILDBOX_FIPS_NAME=$(BUILDBOX_FIPS)
+	$(MAKE) release-fips ARCH=amd64 FIPS=yes BUILDBOX_FIPS_NAME=$(BUILDBOX_FIPS) ADD_LDFLAGS=$(ADD_LDFLAGS)
 
 .PHONY: release-386
 release-386:
@@ -292,7 +293,7 @@ release-amd64-centos6: buildbox-centos6
 release-fips: buildbox-fips
 	@if [ -z ${VERSION} ]; then echo "VERSION is not set"; exit 1; fi
 	docker run $(DOCKERFLAGS) -i $(NOROOT) $(BUILDBOX_FIPS_NAME) \
-		/usr/bin/make -C e release -e ADDFLAGS="$(ADDFLAGS)" OS=$(OS) ARCH=$(ARCH) RUNTIME=$(RUNTIME) FIPS=yes VERSION=$(VERSION) GITTAG=v$(VERSION)
+		/usr/bin/make -C e release -e ADDFLAGS="$(ADDFLAGS)" OS=$(OS) ARCH=$(ARCH) RUNTIME=$(RUNTIME) FIPS=yes VERSION=$(VERSION) GITTAG=v$(VERSION) ADD_LDFLAGS=$(ADD_LDFLAGS)
 
 #
 # Create a Teleport package for CentOS 6 using the build container.
